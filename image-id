@@ -1,0 +1,8 @@
+image_name="amzn-ami-hvm"
+image_version="2016.09"
+image_arch="x86_64"
+image_file="amzn-ami-hvm-2016.09.1.20170119-x86_64.ext4.gpt"
+image_stamp="7044-64ad"
+image_date="20170120232720"
+recipe_name="amzn ami"
+recipe_id="82ae5ee9-1be1-1342-d010-b313-bf96-5783-17649b67"

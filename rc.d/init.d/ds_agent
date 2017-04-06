@@ -1,0 +1,252 @@
+#!/bin/bash
+#
+# For RedHat-style chkconfig
+#
+# ds_agent    Trend Micro Deep Security Agent
+#
+# chkconfig:   2345 13 87
+# description: Trend Micro Deep Security Agent
+# processname: ds_agent
+# config:      /var/opt/ds_agent/core/ds_agent.config
+# config:      /var/opt/ds_agent/core/ds_agent.crt
+# config:      /var/opt/ds_agent/core/ds_agent_dsm.crt
+# pidfile:     /var/run/ds_agent.pid
+#
+#
+# For SuSE-style chkconfig/insserv
+#
+### BEGIN INIT INFO
+# Provides:          ds_agent
+# Required-Start:    $network $syslog
+# Required-Stop:     $network $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Trend Micro Deep Security Agent
+# Description:       Trend Micro Deep Security Agent
+#	The ds_agent program communicates with the Trend Micro
+#	Deep Security Manager and controls the local firewall
+#	and content filtering rules.
+### END INIT INFO
+
+exec="/opt/ds_agent/ds_agent"
+prog=`basename $exec`
+opts='-w /var/opt/ds_agent -b -i -e /opt/ds_agent/ext'
+lockfile=/var/lock/subsys/$prog
+lockdir=$(dirname "$lockfile")
+pidfile=/var/run/ds_agent.pid
+iptablesRule='INPUT -j ACCEPT -m state --state NEW --proto tcp --dport 4118'
+
+LD_LIBRARY_PATH="/opt/ds_agent/lib"
+
+test -f "/opt/ds_agent/lib/libjemalloc.so" && export LD_PRELOAD="/opt/ds_agent/lib/libjemalloc.so"
+
+test -e /etc/sysconfig/$prog && . /etc/sysconfig/$prog
+test -e /etc/default/$prog && . /etc/default/$prog
+
+# Source function library - RedHat only
+if [ -r /etc/init.d/functions ]; then
+    # this is redhat
+    . /etc/init.d/functions
+    os_daemon_start=daemon
+    os_daemon_stop=killproc
+    rc_status() {
+        local ret=$?
+        echo
+        return ${ret}
+    }
+	
+elif [ -r /etc/rc.status ]; then
+    # this is SuSE
+    . /etc/rc.status
+    os_daemon_start=start_daemon
+    os_daemon_stop='killproc -t60'
+    status() {
+        checkproc $1
+        rc_status -v
+    }
+elif [ -r /etc/network/interfaces ];then
+    # this is debian
+	. /lib/lsb/init-functions
+    os_daemon_start=start_daemon
+    os_daemon_stop=stop_daemon
+    start_daemon() {
+        local exec=$1 ; shift
+	local opts=$@
+	/sbin/start-stop-daemon --start --quiet --pidfile $pidfile \
+		--exec $exec -- $opts
+    }
+    stop_daemon() {
+	local pid=$(cat $pidfile 2>/dev/null)
+	/sbin/start-stop-daemon --stop --quiet --pidfile $pidfile \
+		--oknodo --exec $exec
+	local x
+	[ -z "$pid" ] && return 0
+	for ((x=0;x<100;x++)) ; do
+	    local running="$(readlink /proc/$pid/exe 2>/dev/null)"
+	    test "$running" != "$exec" && return 0
+	    sleep 0.1
+	    test $(($x % 10)) -eq 0 && echo -n .
+	    test $x -eq 50 && kill -9 $pid
+	done
+	return 1
+    }
+    action() {
+        echo -n $1
+        shift
+        $*
+        rc_status -v
+    }
+    rc_status() {
+        local ret=$?
+	if [ "$ret" = 0 ]; then 
+		echo [OK] 
+	else
+		echo [ERROR]
+	fi
+        return ${ret}
+    }
+	status() {
+        local pid=$(cat $pidfile 2>/dev/null)
+	    status_of_proc -p $pidfile $1 "ds_agent (pid $pid) process" && exit 0 || exit $?
+    }	
+else
+    echo "Unsupported distribution"
+    exit 1
+fi
+
+# Source networking configuration - RedHat only
+if [ -f /etc/sysconfig/network ]; then
+    . /etc/sysconfig/network
+
+    # Check that networking is up.
+    [ "$NETWORKING" = "no" ] && exit 0
+fi
+
+clearArpCache() {
+    local ip
+    local flags
+    cat /proc/net/arp | grep -v ^IP | while read ip type flags hw mask device ; do
+        if [ "$(( $flags & 0x4))" = 0 ]; then
+                /sbin/arp -d "${ip}" >/dev/null 2>&1
+        fi
+    done
+}
+
+start() {
+
+    # fork to seperate process to open TCP port 4118 to facilitate the communicate between DSM and DSA
+    /bin/bash /opt/ds_agent/dsa_port_add &
+
+    # In 9.5, driver will be started by agent if needed, so no need to do it here.
+
+    if [ -f $pidfile ]; then
+        pidFromFile=$(cat $pidfile)
+        for pid in $(pidof ${prog}); do
+            if [ "${pid}" -eq "${pidFromFile}" ]; then
+                echo -n $"$prog already running"
+                false
+                rc_status -v
+                return 1
+            fi
+        done
+        # If we get down here, the pid from the file didn't match a running process.
+        rm -f $pidfile
+    fi
+    
+    echo -n $"Starting $prog: "
+    if [ -f /etc/dsva-bld ]; then
+        echo -n " DSVA "
+        (cd `dirname $exec` && ulimit -S -c 0 && ulimit -n 8192 >/dev/null 2>&1 && $os_daemon_start $exec $opts)
+    else
+        (cd `dirname $exec` && ulimit -S -c 0 >/dev/null 2>&1 && $os_daemon_start $exec $opts)
+    fi
+
+    # Prevent dsva vmware tool upgrade unintentionally
+    if [ -f /etc/dsva-bld ]; then
+        chmod 444 /usr/bin/vmware-config-tools.pl >/dev/null 2>&1
+        chmod 444 /usr/bin/vmware-uninstall-tools.pl >/dev/null 2>&1
+    fi
+
+    rc_status -v
+    retval=$?
+    [ ! -d "$lockdir" ] && mkdir -p "$lockdir"
+    if [ $retval -eq 0 ] ; then
+        touch $lockfile
+        clearArpCache
+    fi
+    return $retval
+}
+
+stop() {
+
+    # fork to seperate process to close TCP port 4118
+    /bin/bash /opt/ds_agent/dsa_port_remove &
+
+    quiet=${1:-"0"}
+    rm -f $lockfile
+    [ "${quiet}" -ne 0  -a  ! -f "$pidfile" ] && return 0
+    echo -n $"Stopping $prog: "
+    $os_daemon_stop $prog
+    rc_status -v
+    retval=$?
+    rm -f $pidfile
+
+    local x agentPids
+    for ((x=0;x<10;x++)) ; do
+        agentPids=`pidof $exec`
+        if [ $? -ne 0 ]; then
+            break
+        fi
+        sleep 1
+    done
+    if [ -n "$agentPids" ]; then
+        echo "Stop remaining processes"
+        kill -s KILL $agentPids
+    fi
+
+    [ -x /etc/init.d/ds_filter ] && (lsmod | grep -m 1 dsa_ > /dev/null) && /etc/init.d/ds_filter stop
+    
+    (initctl status ds_filter 2> /dev/null | grep start > /dev/null) && initctl stop ds_filter
+
+    return $retval
+}
+
+reset() {
+   /opt/ds_agent/dsa_control -r
+}
+
+restart() {
+    stop
+
+    # sleep a little bit to make sure port removal task by stop action 
+    # gets scheduled before port add task 
+    sleep 2
+
+    start
+}	
+
+reload() {
+    restart
+}
+
+fdrstatus() {
+     status $exec
+}
+
+case "$1" in
+    start|stop|reset|restart|reload)
+        $1
+        ;;
+    stopquiet)
+        stop 1
+        ;;
+    status)
+        fdrstatus
+        ;;
+    condrestart)
+  	[ -f $lockfile ] && restart || :
+	;;
+    *)
+        echo $"Usage: $0 {start|stop|status|reset|restart|condrestart|reload}"
+        exit 1
+esac
