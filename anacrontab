@@ -6,9 +6,12 @@ SHELL=/bin/sh
 PATH=/sbin:/bin:/usr/sbin:/usr/bin
 MAILTO=root
 # the maximal random delay added to the base delay of the jobs
-RANDOM_DELAY=45
+#RANDOM_DELAY=45
+RANDOM_DELAY=25
+
 # the jobs will be started during the following hours only
-START_HOURS_RANGE=3-22
+#START_HOURS_RANGE=3-22
+START_HOURS_RANGE=11
 
 #period in days   delay in minutes   job-identifier   command
 1	5	cron.daily		nice run-parts /etc/cron.daily
